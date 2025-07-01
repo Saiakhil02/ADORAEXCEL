@@ -1,0 +1,45 @@
+<!-- Chat interface container -->
+<div class="chat-interface" id="chatInterface">
+    <!-- Messages container will be populated by Streamlit -->
+    <div class="messages-container"></div>
+</div>
+
+<!-- Custom input area that will be moved to the bottom -->
+<div class="custom-input-area" id="customInputArea" style="display: none;">
+    <div class="chat-input-container">
+        <button class="chat-button clear" title="Clear chat" id="clearChatBtn">🗑️</button>
+        <div class="chat-input-wrapper">
+            <!-- This will be replaced by Streamlit's chat input -->
+            <div id="streamlitChatInput"></div>
+        </div>
+        <button class="chat-button save" title="Save chat" id="saveChatBtn">💾</button>
+    </div>
+</div>
+
+<style>
+/* Ensure the input area stays at the bottom */
+.stApp {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+/* Style the custom input area */
+.custom-input-area {
+    padding: 0.5rem 1rem;
+    background: white;
+    border-top: 1px solid #e0e0e0;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+}
+
+/* Make sure the chat interface has padding at the bottom for the input area */
+.chat-interface {
+    flex: 1;
+    padding-bottom: 80px; /* Adjust based on your input area height */
+    overflow-y: auto;
+}
+</style>
