@@ -7,6 +7,7 @@ psycopg2-binary>=2.9.3; platform_system != 'Windows'
 psycopg2>=2.9.3; platform_system == 'Windows'
 pymysql>=1.0.2
 plotly
+pyPDF2
 openai>=1.0.0
 langchain>=0.0.200
 langchain-community>=0.0.10
