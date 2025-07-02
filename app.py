@@ -5,9 +5,15 @@ import pandas as pd
 import time
 import json
 import requests
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import openai
+import json
+import re
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
-from excel_parser import extract_all_tables  # Updated import
+from file_parser import parse_file, save_uploaded_file  # Updated import for multi-format support
 from plotly_graphs import generate_and_render_graph, detect_graph_request  # Replace mermaid_graphs
 from models import ExcelFile, ExcelTable, ChatHistory, GraphHistory  # Add GraphHistory
 # Load environment variables from .env file in the same directory as app.py
@@ -454,6 +460,7 @@ from datetime import datetime
 import json
 from typing import Dict, List, Any, Optional, Tuple
 # Import our modules
+from excel_parser import extract_all_tables
 from models import ExcelFile, ExcelTable, ChatHistory
 import database as db
 import excel_parser as parser
@@ -518,14 +525,23 @@ def show_upload_page():
     if st.session_state.page != 'upload':
         return
     
-    st.title("📤 Upload New Excel File")
+    st.title("📤 Upload New Data File")
     
     # Display any existing success message
     if st.session_state.upload_success:
         file_id = st.session_state.upload_success.get('file_id')
         tables_data = st.session_state.upload_success.get('tables_data')
+        file_name = st.session_state.upload_success.get('file_name', 'the file')
         
-        st.success("Excel file processed successfully!")
+        # Get file extension for appropriate success message
+        file_ext = os.path.splitext(file_name)[1].lower()
+        
+        if file_ext in ['.pdf']:
+            st.success("PDF file processed successfully! Extracted text is ready for analysis.")
+        elif file_ext in ['.txt']:
+            st.success("Text file processed successfully! Content is ready for analysis.")
+        else:
+            st.success(f"{file_name} processed successfully!")
         st.subheader("Tables Found")
         
         # Display table summary
@@ -553,7 +569,17 @@ def show_upload_page():
                             """,
                             unsafe_allow_html=True
                         )
-                        df = pd.DataFrame(table_data)
+                        # Convert the nested table data to a flat list of dictionaries
+                        if isinstance(table_data, dict) and all(isinstance(v, list) for v in table_data.values()):
+                            # If table_data is a dict of lists, convert to list of dicts
+                            df = pd.DataFrame([row for rows in table_data.values() for row in rows])
+                        elif isinstance(table_data, list):
+                            # If table_data is already a list of dicts
+                            df = pd.DataFrame(table_data)
+                        else:
+                            # For other cases, try to convert directly
+                            df = pd.DataFrame([table_data])
+                            
                         df_cleaned = clean_dataframe(df)
                         # Display the table
                         st.dataframe(df_cleaned)
@@ -586,7 +612,7 @@ def show_upload_page():
                 st.session_state.upload_success = None
                 st.rerun()
         with col2:
-            if st.button("💬 Chat with Sheet", use_container_width=True):
+            if st.button("💬 Analyze Content", use_container_width=True):
                 st.session_state.selected_file_id = file_id
                 st.session_state.tables_data = tables_data
                 st.session_state.page = 'chat'
@@ -597,8 +623,20 @@ def show_upload_page():
         st.markdown("---")
         st.subheader("Upload Another File")
     
-    # File uploader
-    uploaded_file = st.file_uploader("Choose an Excel file", type=["xlsx", "xls"])
+    # File uploader with support for multiple formats
+    st.header("Upload Data File")
+    uploaded_file = st.file_uploader(
+        "Choose a file", 
+        type=["xlsx", "xls", "csv", "json", "pdf", "txt"],
+        help="""
+        Supported formats:
+        - Excel (.xlsx, .xls)
+        - CSV (.csv)
+        - JSON (.json)
+        - PDF (.pdf)
+        - Plain Text (.txt)
+        """
+    )
     
     if uploaded_file and not st.session_state.get('processing_file', False):
         st.session_state.processing_file = True
@@ -606,54 +644,55 @@ def show_upload_page():
         st.session_state.uploaded_file_name = uploaded_file.name
         
         try:
-            with st.spinner("Processing file..."):
+            # Process the uploaded file
+            try:
                 # Save the uploaded file
-                file_path, file_hash = parser.save_uploaded_file(uploaded_file, UPLOAD_FOLDER)
+                file_path, file_hash = save_uploaded_file(uploaded_file, UPLOAD_FOLDER)
                 
-                # Check for duplicate file (by hash or filename)
+                # Check for duplicate files
                 is_duplicate, message = db.is_duplicate_file(file_hash, uploaded_file.name)
                 if is_duplicate:
                     st.warning(message)
-                    try:
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
-                    except Exception as e:
-                        st.error(f"Error cleaning up temporary file: {str(e)}")
                     st.session_state.processing_file = False
                     return
                 
-                # Extract tables from the Excel file
-                tables_data = parser.extract_all_tables(file_path)
+                # Parse the file based on its type
+                tables_data = parse_file(file_path)
                 
-                if not tables_data:
-                    st.error("No tables found in the Excel file.")
+                # Save file metadata to database
+                file_id = db.save_file_metadata(
+                    file_name=uploaded_file.name,
+                    file_path=file_path,
+                    file_hash=file_hash,
+                    tables_data=tables_data,
+                    file_size=os.path.getsize(file_path),
+                    file_type=os.path.splitext(uploaded_file.name)[1].lower().lstrip('.')
+                )
+                
+                # Store success state in session
+                st.session_state.upload_success = {
+                    'file_id': file_id,
+                    'tables_data': tables_data
+                }
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"Error saving to database: {str(e)}")
+                if os.path.exists(file_path):
                     os.remove(file_path)
-                    st.session_state.processing_file = False
-                    return
-                
-                # Save to database
-                try:
-                    file_id = db.save_excel_file(
-                        file_name=os.path.basename(file_path),
-                        file_path=file_path,
-                        file_hash=file_hash,
-                        tables_data=tables_data
-                    )
-                    
-                    # Store success state in session
-                    st.session_state.upload_success = {
-                        'file_id': file_id,
-                        'tables_data': tables_data
-                    }
-                    st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"Error saving to database: {str(e)}")
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
                 
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
+            import traceback
+            st.error(traceback.format_exc())
+            st.warning("""
+            Supported file formats:
+            - Excel (.xlsx, .xls)
+            - CSV (.csv)
+            - JSON (.json)
+            - PDF (.pdf)
+            - Plain Text (.txt)
+            """)
             if 'file_path' in locals() and os.path.exists(file_path):
                 os.remove(file_path)
         finally:
@@ -1321,7 +1360,7 @@ def get_chat_html():
 
 def show_chat_page():
     """Render the chat interface for the selected file with all sheets."""
-    st.title("💬 Chat with Excel")
+    st.title("💬 Chat with Data")
     
     # Check if a file is selected
     if 'selected_file' not in st.session_state or not st.session_state.selected_file:
@@ -1463,7 +1502,7 @@ def show_chat_page():
                         st.markdown("<div style='margin: 0.5rem 0;'></div>", unsafe_allow_html=True)
     
     # Single chat input
-    prompt = st.chat_input("Ask me anything about your Excel data...", key=f"{chat_key}_chat_input")
+    prompt = st.chat_input("Ask me anything about your data...", key=f"{chat_key}_chat_input")
     
     # Process new message
     if prompt and (len(st.session_state.chat_messages[chat_key]) == 0 or 
@@ -1708,10 +1747,10 @@ def show_chat_page():
         st.session_state.page = 'file_detail'
         st.rerun()
 # Navigation
-st.sidebar.title("📊 Excel ChatBot")
+st.sidebar.title("📊 Data ChatBot")
 
 # Navigation options
-nav_options = ["📤 Upload Excel", "📋 Browse Files", "💬 Chat with Sheets"]
+nav_options = ["📤 Upload File", "📋 Browse Files", "💬 Chat with Data"]
 
 # Get current page index
 page_index = 0  # Default to Upload Excel
@@ -1729,13 +1768,13 @@ page = st.sidebar.radio(
 )
 
 # Page routing
-if page == "📤 Upload Excel":
+if page == "📤 Upload File":
     st.session_state.page = 'upload'
     show_upload_page()
 elif page == "📋 Browse Files":
     st.session_state.page = 'browse'
     show_browse_page()
-elif page == "💬 Chat with Sheets":
+elif page == "💬 Chat with Data":
     # Only show chat page if a file is selected
     if 'selected_file' in st.session_state and st.session_state.selected_file:
         st.session_state.page = 'chat'
@@ -1755,3 +1794,278 @@ st.session_state.last_page = st.session_state.page
 # Handle file detail page (not in sidebar)
 if st.session_state.page == 'file_detail':
     show_file_detail_page()
+
+
+# Initialize OpenAI client
+client =  os.getenv('OPENAI_API_KEY', '').strip()
+def get_plotly_code_from_input(input_text, chart_type, columns):
+    prompt = f"""
+You are a Python coding assistant.
+
+Your job is to read the following tabular data and generate full Python code using pandas and plotly to create a {chart_type} chart. Use the exact data provided without any modifications, additions, or deletions.
+
+For histograms or pie charts, use the single column '{columns[0]}' as the data source. For histograms, set the chart title to 'Histogram of {columns[0]}'. For pie charts, aggregate the data (e.g., count of each category in '{columns[0]}' using pd.value_counts()) and set the chart title to 'Distribution of {columns[0]}'. Use plotly.express.pie with 'names' and 'values' parameters for pie charts. For other chart types (e.g., scatter, bar, line), use '{columns[0]}' as the x-axis and '{columns[1]}' as the y-axis, with the chart title '{columns[1]} vs. {columns[0]}'. Do not use generic terms like 'Axis A' or 'Axis B' for axis labels or titles. Ensure all numerical values are native Python types (float or int), not NumPy types like np.float64. For bar or pie charts with categorical data, aggregate data (e.g., count of categories) to ensure a valid plot.
+
+Only output valid Python code. Do not explain anything. Assume any necessary imports.
+
+Input Data:
+{input_text}
+
+Chart Type: {chart_type}
+
+Output:
+(Python code only)
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+        raw_code = response.choices[0].message.content
+        # print("\nRaw OpenAI Response:")
+        # print(raw_code)
+
+        # Clean the response to remove non-code content
+        code = raw_code
+        if code.startswith("```python"):
+            code = code.replace("```python", "").replace("```", "").strip()
+        elif code.startswith("```"):
+            code = code.replace("```", "").strip()
+        return code
+    except openai.OpenAIError as e:
+        print(f"OpenAI API error: {str(e)} (Check API key, rate limits, or network connection)")
+        return None
+    except Exception as e:
+        print(f"Unexpected error in OpenAI API call: {str(e)}")
+        return None
+
+def parse_print_query(query, df_columns):
+    """
+    Parse print requests without OpenAI. Returns (num_rows, columns) or (None, None) if not a print request.
+    """
+    # Patterns for print requests
+    # 1. Whole table: e.g., "print table", "show data", "display all rows", "print all"
+    # 2. Specific columns: e.g., "print 5 rows of Acct Status Desc", "show first 10 rows Acct ID and Cur Due Amt"
+    table_pattern = r"(?:print|show|display)\s*(?:table|data|all\s*(?:rows|data|table))?(?:\s*(\d+)\s*rows?)?$"
+    specific_pattern = r"(?:print|show|display)\s*(?:first)?\s*(\d+)?\s*rows?(?:\s*of)?\s*([\w\s]+?)(?:\s*and\s*([\w\s]+))?$"
+
+    # Check for whole table print
+    match = re.match(table_pattern, query.strip(), re.IGNORECASE)
+    if match:
+        num_rows = int(match.group(1)) if match.group(1) else 200  # Default to 200 rows for table print
+        return num_rows, df_columns.tolist()
+
+    # Check for specific column print
+    match = re.match(specific_pattern, query.strip(), re.IGNORECASE)
+    if not match:
+        return None, None
+
+    num_rows = int(match.group(1)) if match.group(1) else 5  # Default to 5 rows for specific columns
+    col1 = match.group(2).strip()
+    col2 = match.group(3).strip() if match.group(3) else None
+    selected_columns = [col1] if col2 is None else [col1, col2]
+
+    # Validate columns
+    invalid_columns = [col for col in selected_columns if col not in df_columns]
+    if invalid_columns:
+        print(f"Error: The following columns were not found: {invalid_columns}")
+        return None, None
+
+    return num_rows, selected_columns
+
+def parse_chart_query(query, df_columns):
+    """
+    Parse chart queries using OpenAI. Returns (chart_type, columns) or (None, None) if invalid.
+    """
+    prompt = f"""
+You are a natural language processing assistant.
+
+Given the following user query and list of available columns, identify the chart type and the column(s) to be used. The query may be in any format (e.g., direct, conversational, analytical, task-oriented, short, vague, or exploratory) but expresses the intent to create a chart (e.g., histogram, pie, scatter, bar, line) with one or two columns. Histograms and pie charts require one column; other charts (e.g., scatter, bar, line) require two columns. Match column names case-sensitively against the available columns. For vague or exploratory queries (e.g., 'Show me something interesting'), select a suitable chart type (e.g., histogram or pie for a categorical/numeric column) and one or two relevant columns based on the query or data. Return the result as a JSON object with 'chart_type' (string) and 'columns' (list of strings).
+
+Query: {query}
+Available Columns: {df_columns.tolist()}
+
+Output:
+(JSON object only)
+"""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2
+        )
+        result = response.choices[0].message.content
+        parsed = json.loads(result)
+        chart_type = parsed.get("chart_type")
+        columns = parsed.get("columns")
+
+        # Validate parsed results
+        if not chart_type or not columns:
+            print("Error: Invalid query. Could not identify chart type or columns.")
+            return None, None
+        if chart_type.lower() in ["histogram", "pie"] and len(columns) != 1:
+            print(f"Error: {chart_type} requires exactly one column.")
+            return None, None
+        if chart_type.lower() not in ["histogram", "pie"] and len(columns) != 2:
+            print(f"Error: {chart_type} requires exactly two columns.")
+            return None, None
+        invalid_columns = [col for col in columns if col not in df_columns]
+        if invalid_columns:
+            print(f"Error: The following columns were not found: {invalid_columns}")
+            return None, None
+        return chart_type, columns
+    except openai.OpenAIError as e:
+        print(f"Error parsing query (OpenAI API): {str(e)} (Check API key, rate limits, or network connection)")
+        return None, None
+    except json.JSONDecodeError:
+        print("Error: OpenAI returned invalid JSON response.")
+        return None, None
+    except Exception as e:
+        print(f"Error parsing query: {str(e)}")
+        return None, None
+
+def print_multiple_column_values():
+    try:
+        # Get file path from user
+        file_path = input("Enter the Excel file path (e.g., data.xlsx): ")
+
+        # Read the Excel file, limiting to top 200 rows
+        df = pd.read_excel(file_path, nrows=200)
+
+        # Find the first column with at least one non-empty value
+        non_empty_column = None
+        for col in df.columns:
+            if not df[col].isna().all():
+                non_empty_column = col
+                break
+
+        if non_empty_column is None:
+            print("Error: All columns in the Excel file are empty.")
+            return
+
+        # Display available columns
+        # print("\nAvailable columns in the Excel file:")
+        # print(df.columns.tolist())
+
+        # Get query from user
+        query = input("\nEnter your query (e.g., 'generate a scatter graph between Acct ID and Cur Due Amt', 'generate a histogram for ZIP', or 'print table'): ").strip()
+
+        # Check if it's a print request
+        num_rows, selected_columns = parse_print_query(query, df.columns)
+        if num_rows is not None and selected_columns is not None:
+            # Cap at 200 rows due to nrows=200 limit
+            if num_rows > 200:
+                print(f"Warning: Requested {num_rows} rows, but limited to 200 due to Excel read limit.")
+                num_rows = 200
+            # Print the requested rows
+            print(df[selected_columns].head(num_rows).to_string(index=False))
+            return
+
+        # If not a print request, parse as a chart query
+        chart_type, selected_columns = parse_chart_query(query, df.columns)
+        if chart_type is None or selected_columns is None:
+            return
+
+        # Collect values for selected columns (up to 200 rows)
+        rows = []
+        original_data = {col: [] for col in selected_columns}
+        for index, row in df[selected_columns].iterrows():
+            # Convert NumPy types to native Python types
+            row_values = [
+                float(row[col]) if isinstance(row[col], (np.floating, np.integer)) else row[col]
+                if not pd.isna(row[col]) else None for col in selected_columns
+            ]
+            rows.append(str(row_values).replace("None", "null"))
+            for col, value in zip(selected_columns, row_values):
+                original_data[col].append(value)
+            # print(row_values)
+
+        # Format input for OpenAI as a list of lists to ensure clarity
+        input_text = f"data = [\n"
+        for row_values in rows:
+            input_text += f"    {row_values},\n"
+        input_text += "]"
+        # print("\nInput sent to OpenAI:")
+        # print(input_text)
+
+        # Generate Plotly code using OpenAI
+        plotly_code = get_plotly_code_from_input(input_text, chart_type, selected_columns)
+        if plotly_code:
+            # print("\nCleaned Generated Plotly Code:")
+            # print(plotly_code)
+
+            # Validate array lengths and data integrity
+            try:
+                local_vars = {}
+                exec(plotly_code, {}, local_vars)
+                if 'data' in local_vars:
+                    data_dict = local_vars['data']
+                    if isinstance(data_dict, list) and chart_type.lower() not in ["histogram", "pie"]:
+                        # Convert list of lists to dictionary for two-column charts
+                        try:
+                            data_dict = {col: [row[i] for row in data_dict] for i, col in enumerate(selected_columns)}
+                        except IndexError:
+                            print(f"Error: Index out of range in data validation. Generated data structure is malformed.")
+                            return
+                        lengths = [len(values) for values in data_dict.values()]
+                        if len(set(lengths)) > 1:
+                            # print("Warning: Arrays in generated code have different lengths. Truncating to shortest length.")
+                            min_length = min(lengths)
+                            fixed_data = {key: values[:min_length] for key, values in data_dict.items()}
+                            plotly_code = plotly_code.replace(
+                                f"data = {data_dict}",
+                                f"data = {fixed_data}"
+                            )
+                            # print("\nFixed Plotly Code:")
+                            # print(plotly_code)
+
+                    # Verify data integrity
+                    for col in selected_columns:
+                        if col in data_dict:
+                            gen_data = data_dict[col]
+                            orig_data = original_data[col][:len(gen_data)]
+                            if gen_data != orig_data:
+                                print(f"Warning: Data mismatch in column '{col}'. Generated data does not match input data.")
+                                # print(f"Original: {orig_data[:5]}...")
+                                # print(f"Generated: {gen_data[:5]}...")
+
+                # Check if figure is created
+                if 'fig' not in local_vars:
+                    print("Error: No figure created in the generated code.")
+                    return
+                fig = local_vars['fig']
+                if fig is None or not hasattr(fig, 'show'):
+                    print("Error: Generated figure is invalid or empty.")
+                    return
+
+                # Execute the Plotly code only once to display the graph
+                exec(plotly_code)
+                # print("Graph should now be displayed.")
+            except SyntaxError as e:
+                print(f"Error executing Plotly code (SyntaxError): {str(e)}")
+                print("The generated code is likely incomplete or malformed.")
+                # print("Raw OpenAI Response:")
+                # print(raw_code)
+            except IndexError as e:
+                print(f"Error executing Plotly code (IndexError): {str(e)}")
+                print("Generated data structure is malformed.")
+                # print("Raw OpenAI Response:")
+                # print(raw_code)
+            except Exception as e:
+                print(f"Error executing Plotly code: {str(e)}")
+        else:
+            print("Failed to generate Plotly code due to API error.")
+
+    except FileNotFoundError:
+        print("Error: File not found. Please check the file path.")
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+
+if __name__ == "__main__":
+    print_multiple_column_values()
